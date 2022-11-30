@@ -73,6 +73,8 @@ def download_folder_images(uri: str):
 def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionPipeline):
     print(f"Saving model to {output_dir}")
     pipeline.save_pretrained(output_dir)
+    if exp_name is None:
+        return
     zip_location = shutil.make_archive(output_dir, "zip", output_dir)
     s3_path = f"s3://scale-ml/catalog/gen/dreambooth/models/{exp_name}/ckpt_{os.path.basename(output_dir)}.zip"
     print(f"Saving model to {s3_path}")
@@ -204,7 +206,7 @@ def parse_args():
     parser.add_argument(
         "--exp_name",
         type=str,
-        required=True,
+        default=None,
         help="Name of experiment",
     )
     parser.add_argument(
@@ -887,73 +889,73 @@ def main():
 
         save_pretrained(args.exp_name, output_dir, pipeline)
 
-        bundle_name = f"{args.exp_name}-dreambooth-train"
-        endpoint_name = f"catalog-gen-finetuned-{args.exp_name}-train"
-        logger.info(
-            f"Saving Launch endpoint with bundle {bundle_name} at endpoint {endpoint_name} for checkpoint {args.launch}"
-        )
-        try:
-            from launch_internal import get_launch_client
-            
-            client = get_launch_client(
-                api_key="catalog-ml",
-                env=args.launch_env,
-                gateway_endpoint="http://hostedinference-alchemy.ml-serving-internal.scale.com",
+        def push_bundle():
+            bundle_name = f"{args.exp_name}-dreambooth-train"
+            endpoint_name = f"catalog-gen-finetuned-{args.exp_name}-train"
+            logger.info(
+                f"Saving Launch endpoint with bundle {bundle_name} at endpoint {endpoint_name} for checkpoint {args.launch}"
             )
-        except Exception as e:
-            logger.error(f"Could not get Launch client! {e}")
+            try:
+                from launch_internal import get_launch_client
+                
+                client = get_launch_client(
+                    api_key="catalog-ml",
+                    env=args.launch_env,
+                    gateway_endpoint="http://hostedinference-alchemy.ml-serving-internal.scale.com",
+                )
+            except Exception as e:
+                logger.error(f"Could not get Launch client! {e}")
 
-        try:
-            existing_endpoint = client.get_model_endpoint(endpoint_name)
-            if existing_endpoint is not None:
-                logger.warning(f"Found existing endpoint {endpoint_name}! Removing...")
-                client.delete_model_endpoint(endpoint_name)
-        except:
-            logger.info(f"Ignoring the non-existent endpoint {endpoint_name}")
-        try:
-            existing_bundle = client.get_model_bundle(bundle_name)
-            logger.warning(f"Found existing bundle {bundle_name}! Removing...")
-            client.delete_model_bundle(bundle_name)
-        except:
-            logger.info(f"Ignoring the non-existent bundle {bundle_name}")
+            try:
+                existing_endpoint = client.get_model_endpoint(endpoint_name)
+                if existing_endpoint is not None:
+                    logger.warning(f"Found existing endpoint {endpoint_name}! Removing...")
+                    client.delete_model_endpoint(endpoint_name)
+            except:
+                logger.info(f"Ignoring the non-existent endpoint {endpoint_name}")
+            try:
+                existing_bundle = client.get_model_bundle(bundle_name)
+                logger.warning(f"Found existing bundle {bundle_name}! Removing...")
+                client.delete_model_bundle(bundle_name)
+            except:
+                logger.info(f"Ignoring the non-existent bundle {bundle_name}")
 
-        try:
-            new_bundle = client.clone_model_bundle_with_changes(
-                "CW2288-111-dreambooth",  # Copy AF1 bundle, as that is probably the most likely to stay live.
-                bundle_name,
-                {
-                    "model_type": "dreambooth",
-                    "model_name": f"{args.exp_name}/ckpt_final",
-                    "token": "sks",
-                    "similar_titles": ["empty"],
-                    "product_id": args.exp_name,
-                },
-            )
-        except Exception as e:
-            print(f"Could not copy and recreate model bundle! {e}")
+            try:
+                new_bundle = client.clone_model_bundle_with_changes(
+                    "CW2288-111-dreambooth",  # Copy AF1 bundle, as that is probably the most likely to stay live.
+                    bundle_name,
+                    {
+                        "model_type": "dreambooth",
+                        "model_name": f"{args.exp_name}/ckpt_final",
+                        "token": "sks",
+                        "similar_titles": ["empty"],
+                        "product_id": args.exp_name,
+                    },
+                )
+            except Exception as e:
+                print(f"Could not copy and recreate model bundle! {e}")
 
-        ENDPOINT_CONFIG = {
-            "min_workers": 1,
-            "max_workers": 4,
-            "per_worker": 1,
-            "cpus": 7,
-            "memory": "16Gi",
-            "gpus": 1,
-            "gpu_type": "nvidia-ampere-a10",
-            "endpoint_type": "async",
-            "labels": {"team": "catalog", "product": "dreambooth"},
-        }
-        try:
-            client.create_model_endpoint(
-                model_bundle=bundle_name, endpoint_name=endpoint_name, **ENDPOINT_CONFIG
-            )
-            logger.info(f"Generating Launch endpoint succeeded!")
-        except Exception as e:
-            logger.error(f"Could not create new Launch endpoint! {e}")
+            ENDPOINT_CONFIG = {
+                "min_workers": 1,
+                "max_workers": 4,
+                "per_worker": 1,
+                "cpus": 7,
+                "memory": "16Gi",
+                "gpus": 1,
+                "gpu_type": "nvidia-ampere-a10",
+                "endpoint_type": "async",
+                "labels": {"team": "catalog", "product": "dreambooth"},
+            }
+            try:
+                client.create_model_endpoint(
+                    model_bundle=bundle_name, endpoint_name=endpoint_name, **ENDPOINT_CONFIG
+                )
+                logger.info(f"Generating Launch endpoint succeeded!")
+            except Exception as e:
+                logger.error(f"Could not create new Launch endpoint! {e}")
 
-
-
-#        pipeline.save_pretrained(args.output_dir)
+        if args.exp_name is not None:
+            push_bundle()
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
