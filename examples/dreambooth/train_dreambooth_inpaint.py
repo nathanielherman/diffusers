@@ -33,8 +33,52 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
+HfFolder.save_token(os.environ["HF_TOKEN"])
 
 logger = get_logger(__name__)
+
+def upload_file_to_s3(file: str, uri: str, concurrency: int = 10):
+    from scaleml.utils.formats import parse_attachment_url
+    from scaleml.data import storage_client
+    from boto3.s3.transfer import TransferConfig
+
+    r = parse_attachment_url(uri)
+    bucket, key = r.bucket, r.key
+    s3 = storage_client.sync_storage_client()
+
+    # Enable multipart beyond threshold
+    GB = 1024 ** 3
+    config = TransferConfig(multipart_threshold=5 * GB, max_concurrency=concurrency)
+
+    resp = s3.upload_file(Filename=file, Bucket=bucket, Key=key, Config=config)
+    return resp
+
+
+def download_folder_images(uri: str):
+    from scaleml.utils.formats import parse_attachment_url
+    from scaleml.data import storage_client
+
+    r = parse_attachment_url(uri)
+    bucket, key = r.bucket, r.key
+    s3 = storage_client.sync_storage_client()
+    if not os.path.exists(os.path.basename(key)):
+        os.makedirs(os.path.basename(key))
+    for obj in s3.list_objects(Bucket=bucket, Prefix=key)["Contents"]:
+        base_dir_idx = obj["Key"].split(os.sep).index(os.path.basename(key))
+        os.makedirs(os.path.join(*obj["Key"].split(os.sep)[base_dir_idx:-1]), exist_ok=True)
+        s3.download_file(bucket, obj["Key"], os.path.join(*obj["Key"].split(os.sep)[base_dir_idx:]))
+    return os.path.basename(key)
+
+
+def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionPipeline):
+    print(f"Saving model to {output_dir}")
+    pipeline.save_pretrained(output_dir)
+    zip_location = shutil.make_archive(output_dir, "zip", output_dir)
+    s3_path = f"s3://scale-ml/catalog/gen/dreambooth/models/{exp_name}/ckpt_{os.path.basename(output_dir)}.zip"
+    print(f"Saving model to {s3_path}")
+    upload_file_to_s3(zip_location, s3_path)
+    print(f"Finished saving!")
+    return s3_path
 
 
 _invert = False
@@ -837,6 +881,10 @@ def main():
         output_dir = os.path.join(args.output_dir, "final")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
+        with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+            json.dump(args.__dict__, f, indent=2)
+        shutil.copy("train_dreambooth_inpaint.py", args.output_dir)
+
         save_pretrained(args.exp_name, output_dir, pipeline)
 
         bundle_name = f"{args.exp_name}-dreambooth-train"
