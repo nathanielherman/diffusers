@@ -146,6 +146,24 @@ def random_mask(im_shape, ratio=1, mask_full_image=False):
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
+        "--launch",
+        type=int,
+        default=-1,
+        help="What checkpoint to launch an endpoint at. Defaults to no checkpoint launched.",
+    )
+    parser.add_argument(
+        "--launch_env",
+        type=str,
+        default="staging",
+        help="What environment to launch endpoint to.",
+    )
+    parser.add_argument(
+        "--exp_name",
+        type=str,
+        required=True,
+        help="Name of experiment",
+    )
+    parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
         default=None,
@@ -437,6 +455,10 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
 
 def main():
     args = parse_args()
+    if args.output_dir is None:
+        print(f"Setting output dir to {args.exp_name}/")
+        args.output_dir = args.exp_name
+
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator = Accelerator(
@@ -572,6 +594,9 @@ def main():
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
     )
+
+    if args.instance_data_dir.startswith("s3://"):
+       args.instance_data_dir = download_folder_images(args.instance_data_dir)
 
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
@@ -808,10 +833,79 @@ def main():
             unet=accelerator.unwrap_model(unet),
             text_encoder=accelerator.unwrap_model(text_encoder),
         )
-        pipeline.save_pretrained(args.output_dir)
-        with open(os.path.join(args.output_dir, "args.json"), "w") as f:
-            json.dump(args.__dict__, f, indent=2)
-        shutil.copy("train_dreambooth_inpaint.py", args.output_dir)
+
+        output_dir = os.path.join(args.output_dir, "final")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        save_pretrained(args.exp_name, output_dir, pipeline)
+
+        bundle_name = f"{args.exp_name}-dreambooth-train"
+        endpoint_name = f"catalog-gen-finetuned-{args.exp_name}-train"
+        logger.info(
+            f"Saving Launch endpoint with bundle {bundle_name} at endpoint {endpoint_name} for checkpoint {args.launch}"
+        )
+        try:
+            from launch_internal import get_launch_client
+            
+            client = get_launch_client(
+                api_key="catalog-ml",
+                env=args.launch_env,
+                gateway_endpoint="http://hostedinference-alchemy.ml-serving-internal.scale.com",
+            )
+        except Exception as e:
+            logger.error(f"Could not get Launch client! {e}")
+
+        try:
+            existing_endpoint = client.get_model_endpoint(endpoint_name)
+            if existing_endpoint is not None:
+                logger.warning(f"Found existing endpoint {endpoint_name}! Removing...")
+                client.delete_model_endpoint(endpoint_name)
+        except:
+            logger.info(f"Ignoring the non-existent endpoint {endpoint_name}")
+        try:
+            existing_bundle = client.get_model_bundle(bundle_name)
+            logger.warning(f"Found existing bundle {bundle_name}! Removing...")
+            client.delete_model_bundle(bundle_name)
+        except:
+            logger.info(f"Ignoring the non-existent bundle {bundle_name}")
+
+        try:
+            new_bundle = client.clone_model_bundle_with_changes(
+                "CW2288-111-dreambooth",  # Copy AF1 bundle, as that is probably the most likely to stay live.
+                bundle_name,
+                {
+                    "model_type": "dreambooth",
+                    "model_name": f"{args.exp_name}/ckpt_final",
+                    "token": "sks",
+                    "similar_titles": ["empty"],
+                    "product_id": args.exp_name,
+                },
+            )
+        except Exception as e:
+            print(f"Could not copy and recreate model bundle! {e}")
+
+        ENDPOINT_CONFIG = {
+            "min_workers": 1,
+            "max_workers": 4,
+            "per_worker": 1,
+            "cpus": 7,
+            "memory": "16Gi",
+            "gpus": 1,
+            "gpu_type": "nvidia-ampere-a10",
+            "endpoint_type": "async",
+            "labels": {"team": "catalog", "product": "dreambooth"},
+        }
+        try:
+            client.create_model_endpoint(
+                model_bundle=bundle_name, endpoint_name=endpoint_name, **ENDPOINT_CONFIG
+            )
+            logger.info(f"Generating Launch endpoint succeeded!")
+        except Exception as e:
+            logger.error(f"Could not create new Launch endpoint! {e}")
+
+
+
+#        pipeline.save_pretrained(args.output_dir)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
