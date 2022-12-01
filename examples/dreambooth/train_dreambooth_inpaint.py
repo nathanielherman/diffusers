@@ -32,6 +32,7 @@ from PIL import Image, ImageDraw
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
+import subprocess
 
 HfFolder.save_token(os.environ["HF_TOKEN"])
 
@@ -70,13 +71,16 @@ def download_folder_images(uri: str):
     return os.path.basename(key)
 
 
-def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionPipeline):
+def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionInpaintPipeline, freeze_dir=None, ckpt_name='final'):
     print(f"Saving model to {output_dir}")
     pipeline.save_pretrained(output_dir)
+    if freeze_dir and os.path.exists(freeze_dir):
+           subprocess.call('mv -f '+freeze_dir +'/*.* '+ output_dir+'/text_encoder', shell=True)
+           subprocess.call('rm -r '+ freeze_dir, shell=True)
     if exp_name is None:
         return
     zip_location = shutil.make_archive(output_dir, "zip", output_dir)
-    s3_path = f"s3://scale-ml/catalog/gen/dreambooth/models/{exp_name}/ckpt_{os.path.basename(output_dir)}.zip"
+    s3_path = f"s3://scale-ml/catalog/gen/dreambooth/models/{exp_name}/ckpt_{ckpt_name}.zip"
     print(f"Saving model to {s3_path}")
     upload_file_to_s3(zip_location, s3_path)
     print(f"Finished saving!")
@@ -86,9 +90,9 @@ def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionPip
 _invert = False
 _nomask = False
 _nomasksometimes = False
-_fullmaskrate = 1#0.25
+_fullmaskrate = 0.25
 # actual rate is multiplied by fullmaskrate
-_nomaskrate = 1#0.5
+_nomaskrate = 0#0.5
 def prepare_mask_and_masked_image(image, mask):
     orig = image
     if isinstance(image, Image.Image):
@@ -208,6 +212,12 @@ def parse_args():
         type=str,
         default=None,
         help="Name of experiment",
+    )
+    parser.add_argument(
+        "--stop_text_encoder_training",
+        type=int,
+        default=1000000,
+        help=("The step at which the text_encoder is no longer trained"),
     )
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -870,24 +880,46 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
+            if args.train_text_encoder and global_step == args.stop_text_encoder_training:
+                if accelerator.is_main_process:
+                    print("\nFreezing the text_encoder...")
+                    tmp_dir=args.output_dir+'/tmp_ckpt'
+                    frz_dir=args.output_dir + "/text_encoder_frozen"
+                    if os.path.exists(tmp_dir):
+                        subprocess.call('rm -r '+ tmp_dir, shell=True)
+                    os.mkdir(tmp_dir)
+                    if os.path.exists(frz_dir):
+                        subprocess.call('rm -r '+ frz_dir, shell=True)
+                    os.mkdir(frz_dir)
+                    pipe = StableDiffusionInpaintPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path,
+                        unet=accelerator.unwrap_model(unet),
+                        text_encoder=accelerator.unwrap_model(text_encoder),
+                    )
+                    pipe.save_pretrained(tmp_dir)
+                    subprocess.call('mv ' + tmp_dir + "/text_encoder/*.* " + frz_dir, shell=True)
+                    subprocess.call('rm -r '+ tmp_dir, shell=True)
+                    del pipe
+
         accelerator.wait_for_everyone()
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
+        pipeline = StableDiffusionInpaintPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
             text_encoder=accelerator.unwrap_model(text_encoder),
         )
+        frz_dir=args.output_dir + "/text_encoder_frozen" if args.train_text_encoder else None
 
-        output_dir = os.path.join(args.output_dir, "final")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+#        output_dir = os.path.join(args.output_dir, "final")
+#        if not os.path.exists(output_dir):
+#            os.makedirs(output_dir)
         with open(os.path.join(args.output_dir, "args.json"), "w") as f:
             json.dump(args.__dict__, f, indent=2)
         shutil.copy("train_dreambooth_inpaint.py", args.output_dir)
 
-        save_pretrained(args.exp_name, output_dir, pipeline)
+        save_pretrained(args.exp_name, args.output_dir, pipeline, freeze_dir=frz_dir)
 
         def push_bundle():
             bundle_name = f"{args.exp_name}-dreambooth-train"
