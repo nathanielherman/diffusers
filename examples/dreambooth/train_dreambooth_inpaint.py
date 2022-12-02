@@ -28,11 +28,14 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 import subprocess
+
+from rembg.session_factory import new_session
+from rembg import remove as segmask_predict_fn
 
 HfFolder.save_token(os.environ["HF_TOKEN"])
 
@@ -86,8 +89,29 @@ def save_pretrained(exp_name: str, output_dir: str, pipeline: StableDiffusionInp
     print(f"Finished saving!")
     return s3_path
 
+def segmask_predict(image):
+    transparent_layer = np.asarray(image.split()[-1])
 
+    # For transparent background images, add a background                                                                                                                                       
+    background = Image.new("RGBA", image.size, (255, 255, 255))
+    # print(background.size, image.size)
+    image = Image.alpha_composite(background, image)
+
+    mask = segmask_predict_fn(image, only_mask=True, session=rembg_session)
+    mask = np.asarray(mask)
+    mask_bool = mask != 0
+    transparent_layer_bool = transparent_layer != 0
+    mask = mask * (mask_bool & transparent_layer_bool).astype(mask.dtype)
+
+    # Only keep parts of the mask that weren't originally transparent.
+    mask = Image.fromarray(mask)
+    return mask
+
+_rembgmasks = True
+if _rembgmasks:
+    rembg_session = new_session("u2net")
 _invert = False
+_invert = _invert or _rembgmasks
 _nomask = False
 _nomasksometimes = False
 _fullmaskrate = 0.25
@@ -107,7 +131,7 @@ def prepare_mask_and_masked_image(image, mask):
     mask = mask[None]
     mask[mask < 0.5] = 0
     mask[mask >= 0.5] = 1
-    if _invert:
+    if _invert or _rembgmasks:
         mask = 1 - mask
     mask = torch.from_numpy(mask)
     # print(mask.shape)
@@ -115,6 +139,7 @@ def prepare_mask_and_masked_image(image, mask):
 #    mask = mask.reshape(image.shape)
 
     masked_image = image * (mask < 0.5)
+    # mi2 = image * (mask >= 0.5)
     # print(masked_image.shape)
 
     # mi = (masked_image / 2.0 + 0.5).clamp(0, 1)
@@ -126,8 +151,24 @@ def prepare_mask_and_masked_image(image, mask):
     # ri = random.randint(0, 100000)
     # im.save('im%d.png' % ri)
     # # orig.save('orig%d.png' % ri)
+    # torch_to_image(masked_image).save('a%d.png' % random.randint(0, 10000))
+    # torch_to_image(mi2).save('b%d.png' % random.randint(0, 10000))
 
     return mask, masked_image
+
+def torch_to_image(tensor):
+    # print(tensor.shape)
+    i = (tensor / 2.0 + 0.5).clamp(0, 1)
+    i = i[None]
+    # print(i.shape)
+    ni = i.cpu().permute(0, 2, 3, 1).float().numpy()
+    if ni.ndim == 3:
+        ni = ni[None, ...]
+    ni = (ni * 255).round().astype("uint8")    
+    im = Image.fromarray(ni[0]).convert("RGBA")
+    # print(im.size)
+    # im.save('im.png')
+    return im
 
 def get_cutout_holes(height, width, min_holes=8, max_holes=32, min_height=16, max_height=128, min_width=16, max_width=128):
     holes = []
@@ -141,19 +182,15 @@ def get_cutout_holes(height, width, min_holes=8, max_holes=32, min_height=16, ma
         holes.append((x1, y1, x2, y2))
     return holes
 
-def generate_random_mask(im_shape):
+# generates random mask if fill is None, otherwise a mask filled with fill (int from 0 to 255)
+def generate_mask(im_shape, fill=None):
     mask = torch.zeros(im_shape)
-    holes = get_cutout_holes(mask.shape[0], mask.shape[1])
-    for (x1, y1, x2, y2) in holes:
-        mask[y1:y2, x1:x2] = 255.
-    if random.uniform(0, 1) < _fullmaskrate:
-        colors = [0, 255]
-        fillwhite = _nomask == _invert #(!_nomask && !_invert) || (_nomask && _invert)
-        # do 0 mask some % of the time
-        if random.uniform(0, 1) < _nomaskrate:
-            fillwhite = _invert
-#        mask.fill_(255.)
-        mask.fill_(colors[fillwhite])
+    if fill is not None:
+        mask.fill_(fill)
+    else:
+        holes = get_cutout_holes(mask.shape[0], mask.shape[1])
+        for (x1, y1, x2, y2) in holes:
+            mask[y1:y2, x1:x2] = 255.
     # print(mask.shape)
     nparray = mask.cpu().float().numpy()
     im = Image.fromarray(nparray).convert("L")
@@ -162,8 +199,21 @@ def generate_random_mask(im_shape):
     return im
 
 # generate random masks
-def random_mask(im_shape, ratio=1, mask_full_image=False):
-    return generate_random_mask(im_shape)
+def random_mask(im, ratio=1, mask_full_image=False):
+    im_shape = im.shape[1:]
+    if random.uniform(0, 1) < _fullmaskrate:
+        colors = [0, 255]
+        fillwhite = _nomask == _invert #(!_nomask && !_invert) || (_nomask && _invert)
+        # do 0 mask some % of the time
+        if random.uniform(0, 1) < _nomaskrate:
+            fillwhite = _invert
+#        mask.fill_(255.)
+        return generate_mask(im_shape, fill=colors[fillwhite])
+    if _rembgmasks:
+        i = segmask_predict(torch_to_image(im))
+        return i
+    return generate_mask(im_shape)
+
     mask = Image.new("L", im_shape, 0)
     draw = ImageDraw.Draw(mask)
     size = (random.randint(0, int(im_shape[0] * ratio)), random.randint(0, int(im_shape[1] * ratio)))
@@ -456,7 +506,7 @@ class DreamBoothDataset(Dataset):
 
         example["PIL_images"] = instance_image
         example["instance_images"] = self.image_transforms(instance_image)
-        mask = random_mask(example["instance_images"].shape[1:], 1, False)
+        mask = random_mask(example["instance_images"], 1, False)
         example["instance_masks"], example["instance_masked_images"] = prepare_mask_and_masked_image(example["instance_images"], mask)
 
         example["instance_prompt_ids"] = self.tokenizer(
