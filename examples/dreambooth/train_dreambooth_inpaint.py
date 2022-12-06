@@ -62,6 +62,7 @@ def download_folder_images(uri: str):
     from scaleml.utils.formats import parse_attachment_url
     from scaleml.data import storage_client
 
+    print(f"Downloading images from s3 {uri}")
     r = parse_attachment_url(uri)
     bucket, key = r.bucket, r.key
     s3 = storage_client.sync_storage_client()
@@ -102,16 +103,37 @@ def segmask_predict(image):
     mask_bool = mask != 0
     transparent_layer_bool = transparent_layer != 0
     mask = mask * (mask_bool & transparent_layer_bool).astype(mask.dtype)
+    # mi = Image.fromarray(mask)
+    if _bordersize > 0:
+        mask = add_border(mask, _bordersize)
 
     # Only keep parts of the mask that weren't originally transparent.
     mask = Image.fromarray(mask)
+    # mi.save('m1.png')
+    # mask.save('m2.png')
     return mask
 
-_rembgmasks = True
-if _rembgmasks:
-    rembg_session = new_session("u2net")
+def add_border(mask: np.ndarray, n: int):
+    result = mask.copy()
+    rows, cols = mask.shape
+
+    for i in range(rows):
+        for j in range(cols):
+            # If the current pixel is white
+            if mask[i, j] == 255:
+                row_start = max(0, i - n)
+                row_end = min(rows, i + n + 1)
+                col_start = max(0, j - n)
+                col_end = min(cols, j + n + 1)
+                result[row_start:row_end, col_start:col_end] = 255
+
+    # Return the result
+    return result
+
+_rembgmasks = False
+_bordersize = 0
+rembg_session = None
 _invert = False
-_invert = _invert or _rembgmasks
 _nomask = False
 _nomasksometimes = False
 _fullmaskrate = 0.25
@@ -262,6 +284,12 @@ def parse_args():
         type=str,
         default=None,
         help="Name of experiment",
+    )
+    parser.add_argument(
+        "--rembg",
+        default=False,
+        action="store_true",
+        help="whether to use rembg for generating masks (insead of random)",
     )
     parser.add_argument(
         "--stop_text_encoder_training",
@@ -444,6 +472,15 @@ def parse_args():
         if args.class_prompt is None:
             raise ValueError("You must specify prompt for class images.")
 
+    if args.rembg:
+        global _invert
+        global _rembgmasks
+        global rembg_session
+        _rembgmasks = True
+        # TODO: do this less hackily
+        _invert = _invert or _rembgmasks
+        rembg_session = new_session("u2net")
+
     return args
 
 
@@ -471,7 +508,7 @@ class DreamBoothDataset(Dataset):
         if not self.instance_data_root.exists():
             raise ValueError("Instance images root doesn't exists.")
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
+        self.instance_images_path = list([x for x in Path(instance_data_root).iterdir() if not x.is_dir()])
         self.num_instance_images = len(self.instance_images_path)
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images
@@ -697,6 +734,7 @@ def main():
         eps=args.adam_epsilon,
     )
 
+    # noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
     )
@@ -890,21 +928,32 @@ def main():
                 # Predict the noise residual
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
 
+                # Get the target for loss depending on the prediction type
+                target = noise
+                # print(noise_scheduler.config.prediction_type)
+                # if noise_scheduler.config.prediction_type == "epsilon":
+                #     target = noise
+                # elif noise_scheduler.config.prediction_type == "v_prediction":
+                #     target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                # else:
+                #     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+
                 if args.with_prior_preservation:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
                     noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
-                    noise, noise_prior = torch.chunk(noise, 2, dim=0)
+                    target, target_prior = torch.chunk(target, 2, dim=0)
 
                     # Compute instance loss
-                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="none").mean([1, 2, 3]).mean()
+                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean([1, 2, 3]).mean()
 
                     # Compute prior loss
-                    prior_loss = F.mse_loss(noise_pred_prior.float(), noise_prior.float(), reduction="mean")
+                    prior_loss = F.mse_loss(noise_pred_prior.float(), target_prior.float(), reduction="mean")
 
                     # Add the prior loss to the instance loss.
                     loss = loss + args.prior_loss_weight * prior_loss
                 else:
-                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
