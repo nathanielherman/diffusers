@@ -18,9 +18,12 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.utils.data import Dataset
 
+print('hi')
 from accelerate import Accelerator
+print('a')
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+print('b')
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
@@ -28,6 +31,7 @@ from diffusers import (
     StableDiffusionPipeline,
     UNet2DConditionModel,
 )
+print('c')
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image, ImageDraw, ImageOps
@@ -37,6 +41,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 import subprocess
 import requests
 import cv2
+print('d')
 
 from rembg.session_factory import new_session
 from rembg import remove as segmask_predict_fn
@@ -910,12 +915,14 @@ def main():
 
     logging_dir = Path(args.output_dir, args.logging_dir)
 
+    print(1)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with="tensorboard",
         logging_dir=logging_dir,
     )
+    print(2)
 
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
@@ -974,8 +981,10 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    print(3)
     # Handle the repository creation
     if accelerator.is_main_process:
+        print(4)
         if args.push_to_hub:
             if args.hub_model_id is None:
                 repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
@@ -1003,8 +1012,11 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
 
     # Load models and create wrapper for stable diffusion
+    print(5)
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
+    print(6)
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
+    print(7)
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet",
                                                # low_cpu_mem_usage=False, ignore_mismatched_sizes=False
                                                )
@@ -1022,6 +1034,7 @@ def main():
                                                        torch.zeros((1,)) + .1
                                                       ]))
 
+    print(6)
     vae.requires_grad_(False)
     if not args.train_text_encoder:
         text_encoder.requires_grad_(False)
@@ -1363,21 +1376,28 @@ def main():
                         print('test', torch.min(alpha),torch.max(alpha))
                         # denoised_lighting = lighting
 
-                        relit = (mask >= 0.5) * denoised + (mask < 0.5) * (denoised * (1-alpha) + denoised_lighting * alpha)
+                        vaedecode = True
                         unlit_mask = (mask < 0.5) * denoised
                         masked_latents_mask = (mask < 0.5) * masked_latents
-                        #im = vae.decode(1 / 0.18215 * denoised).sample
-#                         with torch.no_grad():
-#                             orig_im = vae.decode()
-#                             do_transforms()
-#                             orig_latents = vae.encode()
+                        if vaedecode:
+                            alpha_up = F.interpolate(alpha, scale_factor=8)
+                            denoised_img = vae.decode(1 / 0.18215 * denoised).sample
+                            denoised_lighting_img = vae.decode(1 / 0.18215 * denoised_lighting).sample
+                            orig = batch["masked_images"].to(dtype=weight_dtype)
+                            # orig = denoised_img
+                            relit_img = (masks >= 0.5) * denoised_img + (masks < 0.5) * (orig * (1-alpha_up) + denoised_lighting_img * alpha_up)
+                            # relit = vae.encode(relit_img).latent_dist.sample() * 0.18215
+                            lit_loss = F.mse_loss(relit_img.float(), batch['pixel_values'].to(dtype=weight_dtype).float(), reduction="mean")
+                        else:
+                            relit = (mask >= 0.5) * denoised + (mask < 0.5) * (denoised * (1-alpha) + denoised_lighting * alpha)
+                            lit_loss = F.mse_loss(relit.float(), latents.float(), reduction="mean")
 
-                        lit_loss = F.mse_loss(relit.float(), latents.float(), reduction="mean")
                         unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
                         loss = .5 * (lit_loss + unlit_loss)
                         print(lit_loss)
                         print(unlit_loss)
                         with torch.no_grad():
+                            relit = vae.encode(relit_img).latent_dist.sample() * 0.18215
                             print(alpha.shape)
                             print(denoised.shape)
                             alpha_up = F.interpolate(alpha, scale_factor=8)
@@ -1388,6 +1408,8 @@ def main():
                             light_add = relit - denoised
                             light_add = (light_add - torch.min(light_add)) / (torch.max(light_add)-torch.min(light_add))
                             torch_to_image(light_add.detach()).save('light_add%d.png' % ri)
+                            
+                            torch_to_image(relit_img.detach()).save('img_space_relit%d.png' % ri)
 
                             denoised_img = vae.decode(1 / 0.18215 * denoised).sample
                             torch_to_image(denoised_img.detach()).save('out%d.png' % ri)
