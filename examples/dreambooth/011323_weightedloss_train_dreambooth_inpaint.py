@@ -36,6 +36,7 @@ from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image, ImageDraw, ImageOps
 from torchvision import transforms
+import torchvision.transforms.functional as Ft
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 import subprocess
@@ -344,8 +345,10 @@ def prepare_mask_and_masked_image(image, mask):
     orig = image
     if random.random() < _relightprob:
         image = transforms.ColorJitter(
-            brightness=.7,#(.75, 1.1),
-            contrast=.7,#(.85, 1.05),
+            brightness=(.5,.9),
+            #(1.1,1.3),
+            #(.75, 1.1),
+            #contrast=.7,#(.85, 1.05),
             # saturation=.5,
             # hue=.5,
         )(image)
@@ -1021,17 +1024,24 @@ def main():
                                                # low_cpu_mem_usage=False, ignore_mismatched_sizes=False
                                                )
     print(unet.conv_out.weight.shape)
-    unet.conv_out.weight = torch.nn.Parameter(torch.cat([unet.conv_out.weight, 
-                                                         unet.conv_out.weight,
-                                                         # torch.zeros_like(unet.conv_out.weight),
-                                                         torch.zeros((1, 320, 3, 3))+.1
+    _lightnoise = False
+    _brightness = False
+    _directlight = True
+    if _lightnoise:
+        w,b = unet.conv_out.weight, unet.conv_out.bias
+    elif _brightness:
+        w,b = torch.zeros_like(unet.conv_out.weight) + .001, torch.zeros_like(unet.conv_out.bias) + .001
+    else:
+        w,b = torch.zeros_like(unet.conv_out.weight) + .000, torch.zeros_like(unet.conv_out.bias)+.000
+    unet.conv_out.weight = torch.nn.Parameter(torch.cat([unet.conv_out.weight,
+                                                          w,
+                                                         torch.zeros((1, 320, 3, 3))+.1,
                                                         ]))
     print(unet.conv_out.weight.shape)
     print(unet.conv_out.bias.shape)
     unet.conv_out.bias = torch.nn.Parameter(torch.cat([unet.conv_out.bias,
-                                                       unet.conv_out.bias,
-                                                       # torch.zeros_like(unet.conv_out.bias),
-                                                       torch.zeros((1,)) + .1
+                                                        b,
+                                                       torch.zeros((1,)) + .1,
                                                       ]))
 
     print(6)
@@ -1296,6 +1306,10 @@ def main():
                     masks = batch["masks"]
                     # print(masks.shape)
                     mask = F.interpolate(masks, scale_factor=1 / 8)
+
+                    maskedlat = vae.encode((batch["pixel_values"] * (masks < .5)).to(dtype=weight_dtype)).latent_dist.sample()
+                    maskedlat = maskedlat * 0.18215
+
                     # vaemask = vae.encode(mask.to(dtype=weight_dtype)).latent_dist.sample()
                     weights = batch["weights"]
                     weight = F.interpolate(weights, scale_factor=1 / 8)
@@ -1368,70 +1382,133 @@ def main():
                         # loss = F.mse_loss(relit.float(), target.float(), reduction="mean")
 
                         denoised = get_t0(noise_pred, timesteps, noisy_latents)
-                        denoised_lighting = get_t0(lighting, timesteps, noisy_latents)
+                        if _lightnoise:
+                            denoised_lighting = get_t0(lighting, timesteps, noisy_latents)
+                        else:
+                            denoised_lighting = lighting
+
+                        orig_alpha = alpha
                         mi = torch.min(alpha)
-                        mx= torch.max(alpha)
-                        print('minmax', mi,mx)
-                        alpha = (alpha-mi)/(mx-mi)
-                        print('test', torch.min(alpha),torch.max(alpha))
-                        # denoised_lighting = lighting
+                        mx = torch.max(alpha)
+                        #alpha = torch.clamp(1+alpha, .5, 2)
+                        alpha = (alpha-mi)/(mx-mi)# / 0.5 - 1.0
+                        print(mi, mx)
 
                         vaedecode = True
                         unlit_mask = (mask < 0.5) * denoised
                         masked_latents_mask = (mask < 0.5) * masked_latents
+                        #with torch.no_grad():
                         if vaedecode:
-                            alpha_up = F.interpolate(alpha, scale_factor=8)
-                            denoised_img = vae.decode(1 / 0.18215 * denoised).sample
-                            denoised_lighting_img = vae.decode(1 / 0.18215 * denoised_lighting).sample
                             orig = batch["masked_images"].to(dtype=weight_dtype)
                             # orig = denoised_img
-                            relit_img = (masks >= 0.5) * denoised_img + (masks < 0.5) * (orig * (1-alpha_up) + denoised_lighting_img * alpha_up)
+                            denoised_img = vae.decode(1 / 0.18215 * denoised).sample
+                            if not _brightness:
+                                alpha_up = F.interpolate(alpha, scale_factor=8)
+                                if _directlight:
+                                    denoised_lighting_img = F.interpolate(torch.split(denoised_lighting,[3,1],dim=1)[0], scale_factor=8)#vae.decode(1 / 0.18215 * denoised_lighting).sample
+                                else:
+                                    denoised_lighting_img = vae.decode(1 / 0.18215 * denoised_lighting).sample
+
+
+                                #with torch.no_grad():
+
+                                _addsquares = False
+                                if _addsquares:
+                                    comb = torch.cat([denoised_lighting_img, denoised_img, torch.zeros_like(denoised_img)+-1.01, torch.zeros_like(denoised_img)+1.01])
+                                    mi,mx = torch.min(comb), torch.max(comb)
+                                    print(mi,mx)
+                                    sq = lambda x: ((x-mi)/(mx-mi))**2
+                                    rt = lambda x: torch.clamp(x,0,1)**.5 * (mx-mi) + mi
+
+                                    print('mins', torch.min(denoised_lighting_img),torch.max(denoised_lighting_img))
+                                    #denoised_lighting_img = ((denoised_lighting_img + 1.5)/3)**2
+                                    #denoised_lighting_img = (denoised_lighting_img**.5) * 3 - 1.5
+                                    #print('mins2', torch.min(denoised_lighting_img),torch.max(denoised_lighting_img))
+                                    denoised_lighting_img_2 = sq(denoised_lighting_img) - sq(denoised_img)
+                                    relit_img2 = (masks >= 0.5) * denoised_img + (masks < 0.5) * rt(
+                                    #orig * denoised_lighting_img)
+                                        sq(orig) * (1) + (denoised_lighting_img_2) * alpha_up)
+                                    relit_img, denoised_lighting_img = relit_img2, rt(denoised_lighting_img_2)
+                                else:
+                                    if _lightnoise:
+                                        denoised_lighting_img -= denoised_img
+                                    #denoised_lighting_img = torch.zeros_like(denoised_lighting_img)
+                                    relit_img = (masks >= 0.5) * denoised_img + (masks < 0.5) * (
+                                        (orig) * (1-alpha_up) + (denoised_lighting_img) * alpha_up
+                                    )
+                            else:
+                                brightness = torch.mean(lighting[:, 0, :, :])
+                                contrast = torch.mean(lighting[:, 1, :, :])
+                                print(brightness, contrast)
+                                relit_img = Ft.adjust_brightness(orig, 1+torch.clamp(brightness, -.8, 5))
+                                denoised_lighting_img = relit_img
+                                relit_img = Ft.adjust_contrast(relit_img, 1+torch.clamp(contrast, -.8, 5))
+                                relit_img = (masks >= 0.5) * denoised_img + (masks < 0.5) * relit_img
+
                             # relit = vae.encode(relit_img).latent_dist.sample() * 0.18215
                             lit_loss = F.mse_loss(relit_img.float(), batch['pixel_values'].to(dtype=weight_dtype).float(), reduction="mean")
-                        else:
-                            relit = (mask >= 0.5) * denoised + (mask < 0.5) * (denoised * (1-alpha) + denoised_lighting * alpha)
-                            lit_loss = F.mse_loss(relit.float(), latents.float(), reduction="mean")
+                        #else:
+#                            relit = (mask >= 0.5) * denoised + (mask < 0.5) * (denoised * (1-alpha) + denoised_lighting * alpha)
+ #                           lit_loss = F.mse_loss(relit.float(), latents.float(), reduction="mean")
 
-                        unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
-                        loss = .5 * (lit_loss + unlit_loss)
+                        #with torch.no_grad():
+                        loss = unlit_loss = 0
+                        #loss = unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
+                        loss = F.mse_loss(orig_alpha.float(), torch.zeros_like(orig_alpha).float(), reduction="mean")
+                        loss += lit_loss
                         print(lit_loss)
                         print(unlit_loss)
+                        import sys
+                        sys.stderr.flush()
+                        sys.stdout.flush()
                         with torch.no_grad():
+                            ri = '%d' % global_step
                             relit = vae.encode(relit_img).latent_dist.sample() * 0.18215
                             print(alpha.shape)
                             print(denoised.shape)
                             alpha_up = F.interpolate(alpha, scale_factor=8)
                             alpha_mask = torch.cat([alpha_up, alpha_up, alpha_up], dim=1)
                             print(alpha_mask.shape)
-                            ri = random.randint(0,10000)
-                            torch_to_image(alpha_mask.detach()).save('mask%d.png' % ri)
+                            #print(torch.min(alpha_up), torch.max(alpha_up))
+                            sys.stderr.flush()
+                            alpha_light = alpha_up * denoised_lighting_img
+                            torch_to_image(alpha_light.detach()).save('alphalight%s.png' % ri)
+                            torch_to_image(alpha_mask.detach()).save('mask%s.png' % ri)
+                            #torch_to_image((alpha_up*batch['pixel_values']).detach()).save('alphaorig%s.png'%ri)
                             light_add = relit - denoised
                             light_add = (light_add - torch.min(light_add)) / (torch.max(light_add)-torch.min(light_add))
-                            torch_to_image(light_add.detach()).save('light_add%d.png' % ri)
-                            
-                            torch_to_image(relit_img.detach()).save('img_space_relit%d.png' % ri)
+                            torch_to_image(light_add.detach()).save('light_add%s.png' % ri)
+
+                            torch_to_image(relit_img.detach()).save('img_space_relit%s.png' % ri)
+
+                            #torch_to_image(relit_img2.detach()).save('sqfinal%s.png' % ri)
+                            #torch_to_image(rt(denoised_lighting_img_2).detach()).save('sqdiff%s.png'%ri)
 
                             denoised_img = vae.decode(1 / 0.18215 * denoised).sample
-                            torch_to_image(denoised_img.detach()).save('out%d.png' % ri)
+                            torch_to_image(denoised_img.detach()).save('out%s.png' % ri)
 
                             im = vae.decode(1 / 0.18215 * denoised_lighting).sample
-                            torch_to_image(im.detach()).save('outlight%d.png' % ri)
-                            
+                            torch_to_image(im.detach()).save('outlight%s.png' % ri)
                             orig = batch["masked_images"]
                             relit_final = (masks >= 0.5) * denoised_img + (masks < 0.5) * (orig * (1-alpha_up) + im * alpha_up)
-                            torch_to_image(relit_final.detach()).save('final%d.png' % ri)
-                            torch_to_image(orig.detach()).save('mi_full%d.png' % ri)
-                            torch_to_image(batch['pixel_values'].detach()).save('true_orig%d.png' % ri)
+                            torch_to_image(relit_final.detach()).save('final%s.png' % ri)
+                            torch_to_image(orig.detach()).save('mi_full%s.png' % ri)
+                            torch_to_image(batch['pixel_values'].detach()).save('true_orig%s.png' % ri)
 
                             im = vae.decode(1 / 0.18215 * unlit_mask).sample
-                            torch_to_image(im.detach()).save('unlit%d.png' % ri)
+                            torch_to_image(im.detach()).save('unlit%s.png' % ri)
                             im = vae.decode(1 / 0.18215 * masked_latents_mask).sample
-                            torch_to_image(im.detach()).save('mi%d.png' % ri)
+                            torch_to_image(im.detach()).save('mi%s.png' % ri)
 
                             im = vae.decode(1 / 0.18215 * relit).sample
-                            torch_to_image(im.detach()).save('lit%d.png' % ri)
+                            torch_to_image(im.detach()).save('lit%s.png' % ri)
                             im = vae.decode(1 / 0.18215 * latents).sample
-                            torch_to_image(im.detach()).save('orig%d.png' % ri)
+                            torch_to_image(im.detach()).save('orig%s.png' % ri)
+                            im = vae.decode(1 / 0.18215 * latents * (mask < .5)).sample
+                            torch_to_image(im.detach()).save('masked_orig%s.png' % ri)
+
+                            im = vae.decode(1 / 0.18215 * maskedlat).sample
+                            torch_to_image(im.detach()).save('maskedlat%s.png' % ri)                            
                         # denoised = denoised * mask
                         # loss += F.mse_loss(denoised.float(), masked_latents.float(), reduction="mean")
                     else:
