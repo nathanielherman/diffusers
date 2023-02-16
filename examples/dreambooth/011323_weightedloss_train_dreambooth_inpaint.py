@@ -1024,9 +1024,9 @@ def main():
                                                # low_cpu_mem_usage=False, ignore_mismatched_sizes=False
                                                )
     print(unet.conv_out.weight.shape)
-    _lightnoise = False
+    _lightnoise = True
     _brightness = False
-    _directlight = True
+    _directlight = False
     if _lightnoise:
         w,b = unet.conv_out.weight, unet.conv_out.bias
     elif _brightness:
@@ -1403,9 +1403,9 @@ def main():
                             # orig = denoised_img
                             denoised_img = vae.decode(1 / 0.18215 * denoised).sample
                             if not _brightness:
-                                alpha_up = F.interpolate(alpha, scale_factor=8)
+                                alpha_up = F.interpolate(alpha, scale_factor=8, mode='bicubic')
                                 if _directlight:
-                                    denoised_lighting_img = F.interpolate(torch.split(denoised_lighting,[3,1],dim=1)[0], scale_factor=8)#vae.decode(1 / 0.18215 * denoised_lighting).sample
+                                    denoised_lighting_img = F.interpolate(torch.split(denoised_lighting,[3,1],dim=1)[0], scale_factor=8, mode='bicubic')#vae.decode(1 / 0.18215 * denoised_lighting).sample
                                 else:
                                     denoised_lighting_img = vae.decode(1 / 0.18215 * denoised_lighting).sample
 
@@ -1413,28 +1413,31 @@ def main():
                                 #with torch.no_grad():
 
                                 _addsquares = False
-                                if _addsquares:
-                                    comb = torch.cat([denoised_lighting_img, denoised_img, torch.zeros_like(denoised_img)+-1.01, torch.zeros_like(denoised_img)+1.01])
-                                    mi,mx = torch.min(comb), torch.max(comb)
-                                    print(mi,mx)
-                                    sq = lambda x: ((x-mi)/(mx-mi))**2
-                                    rt = lambda x: torch.clamp(x,0,1)**.5 * (mx-mi) + mi
-
+                                comb = torch.cat([denoised_lighting_img, denoised_img, torch.zeros_like(denoised_img)+-1.01, torch.zeros_like(denoised_img)+1.01])
+                                mi,mx = torch.min(comb), torch.max(comb)
+                                print(mi,mx)
+                                sq = lambda x: ((x-mi)/(mx-mi))**2
+                                rt = lambda x: torch.clamp(x,0,1)**.5 * (mx-mi) + mi
+                                #if _addsquares:
+                                with torch.no_grad():
                                     print('mins', torch.min(denoised_lighting_img),torch.max(denoised_lighting_img))
                                     #denoised_lighting_img = ((denoised_lighting_img + 1.5)/3)**2
                                     #denoised_lighting_img = (denoised_lighting_img**.5) * 3 - 1.5
                                     #print('mins2', torch.min(denoised_lighting_img),torch.max(denoised_lighting_img))
-                                    denoised_lighting_img_2 = sq(denoised_lighting_img) - sq(denoised_img)
+                                    denoised_lighting_img_2 = sq(Ft.gaussian_blur(denoised_lighting_img,25)) - sq(Ft.gaussian_blur(denoised_img,25))
                                     relit_img2 = (masks >= 0.5) * denoised_img + (masks < 0.5) * rt(
                                     #orig * denoised_lighting_img)
-                                        sq(orig) * (1) + (denoised_lighting_img_2) * alpha_up)
-                                    relit_img, denoised_lighting_img = relit_img2, rt(denoised_lighting_img_2)
-                                else:
+                                        sq(orig) * (1) + (denoised_lighting_img_2)# * alpha_up
+                                    )
+                                    #relit_img, denoised_lighting_img = relit_img2, rt(denoised_lighting_img_2)
+                                #else:
+                                if True:
                                     if _lightnoise:
-                                        denoised_lighting_img -= denoised_img
+                                        denoised_lighting_img = Ft.gaussian_blur(denoised_lighting_img, 25) - Ft.gaussian_blur(denoised_img, 25)
+                                    #denoised_lighting_img = Ft.gaussian_blur(denoised_lighting_img, 25)
                                     #denoised_lighting_img = torch.zeros_like(denoised_lighting_img)
                                     relit_img = (masks >= 0.5) * denoised_img + (masks < 0.5) * (
-                                        (orig) * (1-alpha_up) + (denoised_lighting_img) * alpha_up
+                                        (orig) * (1) + (denoised_lighting_img)# * alpha_up
                                     )
                             else:
                                 brightness = torch.mean(lighting[:, 0, :, :])
@@ -1453,8 +1456,11 @@ def main():
 
                         #with torch.no_grad():
                         loss = unlit_loss = 0
-                        #loss = unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
-                        loss = F.mse_loss(orig_alpha.float(), torch.zeros_like(orig_alpha).float(), reduction="mean")
+                        if _lightnoise:
+                            loss = unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
+                        litonly_loss = F.mse_loss((denoised_lighting * (mask<.5)).float(), (latents*(mask < .5)).float(), reduction="mean")
+                        loss += litonly_loss
+                        #loss += F.mse_loss(orig_alpha.float(), torch.zeros_like(orig_alpha).float(), reduction="mean")
                         loss += lit_loss
                         print(lit_loss)
                         print(unlit_loss)
@@ -1466,7 +1472,7 @@ def main():
                             relit = vae.encode(relit_img).latent_dist.sample() * 0.18215
                             print(alpha.shape)
                             print(denoised.shape)
-                            alpha_up = F.interpolate(alpha, scale_factor=8)
+                            alpha_up = F.interpolate(alpha, scale_factor=8, mode='bicubic')
                             alpha_mask = torch.cat([alpha_up, alpha_up, alpha_up], dim=1)
                             print(alpha_mask.shape)
                             #print(torch.min(alpha_up), torch.max(alpha_up))
@@ -1474,10 +1480,13 @@ def main():
                             alpha_light = alpha_up * denoised_lighting_img
                             torch_to_image(alpha_light.detach()).save('alphalight%s.png' % ri)
                             torch_to_image(alpha_mask.detach()).save('mask%s.png' % ri)
+                            torch_to_image(Ft.gaussian_blur(alpha_mask,25).detach()).save('blurmask%s.png' % ri)
+                            torch_to_image(torch.cat([alpha, alpha, alpha], dim=1).detach()).save('smallmask%s.png' % ri)
+                            torch_to_image(torch.split(denoised_lighting,[3,1],dim=1)[0]).save('smalllight%s.png' % ri)
+                            torch_to_image(denoised_lighting_img.detach()).save('outlight_full%s.png' % ri)
                             #torch_to_image((alpha_up*batch['pixel_values']).detach()).save('alphaorig%s.png'%ri)
-                            light_add = relit - denoised
-                            light_add = (light_add - torch.min(light_add)) / (torch.max(light_add)-torch.min(light_add))
-                            torch_to_image(light_add.detach()).save('light_add%s.png' % ri)
+                            torch_to_image(relit_img2.detach()).save('sqout%s.png' % ri)
+                            torch_to_image(rt(denoised_lighting_img_2).detach()).save('sqdiff%s.png' % ri)
 
                             torch_to_image(relit_img.detach()).save('img_space_relit%s.png' % ri)
 
@@ -1494,6 +1503,11 @@ def main():
                             torch_to_image(relit_final.detach()).save('final%s.png' % ri)
                             torch_to_image(orig.detach()).save('mi_full%s.png' % ri)
                             torch_to_image(batch['pixel_values'].detach()).save('true_orig%s.png' % ri)
+
+
+                            light_add = relit_img - orig#relit - denoised
+                            #light_add = (light_add - torch.min(light_add)) / (torch.max(light_add)-torch.min(light_add))
+                            torch_to_image(light_add.detach()).save('light_add%s.png' % ri)
 
                             im = vae.decode(1 / 0.18215 * unlit_mask).sample
                             torch_to_image(im.detach()).save('unlit%s.png' % ri)
@@ -1547,6 +1561,7 @@ def main():
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
+            print('step', global_step)
             if global_step >= args.max_train_steps:
                 break
 

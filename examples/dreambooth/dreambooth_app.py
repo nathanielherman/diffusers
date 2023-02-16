@@ -37,7 +37,7 @@ import modal
 web_app = FastAPI()
 assets_path = Path(__file__).parent / "catalog_data"
 script_path = Path(__file__).parent / "011323_weightedloss_train_dreambooth_inpaint.py"
-stub = modal.Stub(name="example-dreambooth-app")
+stub = modal.Stub()
 
 # Commit in `diffusers` to checkout `train_dreambooth.py` from.
 GIT_SHA = "ed616bd8a8740927770eebe017aedb6204c6105f"
@@ -202,7 +202,9 @@ def load_images(image_urls):
         modal.Mount.from_local_file(script_path, remote_path="/root/train_dreambooth_inpaint.py")
     ],
 )
-def train(instance_example_urls, config=TrainConfig(), model_name="directlight2"):
+def train(instance_example_urls, config=TrainConfig(), model_name="noisegauss2", steps=500, lr=2e-6):
+    config.max_train_steps = steps
+    config.learning_rate = lr
     import subprocess
 
     import huggingface_hub
@@ -287,7 +289,7 @@ def train(instance_example_urls, config=TrainConfig(), model_name="directlight2"
         modal.Mount.from_local_file(script_path, remote_path="/root/train_dreambooth_inpaint.py")
     ],
 )
-def fastapi_app2(config=AppConfig()):
+def fastapi_app3(config=AppConfig()):
     import gradio as gr
     import torch
     from diffusers import DDIMScheduler, StableDiffusionPipeline
@@ -363,5 +365,5 @@ def fastapi_app2(config=AppConfig()):
 
 
 @stub.local_entrypoint
-def run():
-    train.call([])
+def run(name, steps=500, lr=2e-6):
+    train.call([], model_name=name, steps=steps, lr=lr)
