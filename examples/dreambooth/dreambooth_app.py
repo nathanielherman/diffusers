@@ -40,7 +40,7 @@ script_path = Path(__file__).parent / "011323_weightedloss_train_dreambooth_inpa
 stub = modal.Stub()
 
 # Commit in `diffusers` to checkout `train_dreambooth.py` from.
-GIT_SHA = "ed616bd8a8740927770eebe017aedb6204c6105f"
+GIT_SHA = "a90a9525b0d829e8779e706344093e6d3e7d9970"#"ed616bd8a8740927770eebe017aedb6204c6105f"
 
 image = (
     modal.Image.conda(python_version='3.10')
@@ -51,19 +51,20 @@ image = (
             channels=["conda-forge", "nvidia"],
         )
     .pip_install(
-        "accelerate",
+        "accelerate==0.14.0",
         "datasets",
         "ftfy",
         "gradio~=3.10",
         "smart_open",
-        "transformers",
-        "torch",
-        "torchvision",
-        "triton",
+        "transformers==4.26.0",
+        "torch==1.12.1",
+        "torchvision==0.13.1",
+        "triton==2.0.0.dev20221117",
         "rembg[gpu]",
-        "bitsandbytes",
+        "bitsandbytes==0.35.4",
     )
-    .pip_install("xformers", pre=True)
+    #.pip_install("xformers", pre=True)
+    .pip_install(["torch==1.12.1+cu113", "torchvision==0.13.1+cu113"], find_links="https://download.pytorch.org/whl/torch_stable.html")#"https://download.pytorch.org/whl/cu116")
     .apt_install(
         "git",
     )
@@ -240,16 +241,20 @@ def train(instance_example_urls, config=TrainConfig(), name="noisegauss2", steps
         [
             "accelerate",
             "launch",
+            #"--num_processes 1",
+            #"--num_machines 1",
+            #"--mixed_precision \"fp16\"",
             "/root/train_dreambooth_inpaint.py",
-            "--train_text_encoder",  # needs at least 16GB of GPU RAM.
+            #"--train_text_encoder",  # needs at least 16GB of GPU RAM.
             f"--pretrained_model_name_or_path={config.model_name}",
             f"--instance_data_dir={img_path}",
             f"--output_dir={trained_dir}",
-            f"--instance_prompt='{prompt}'",
+            f"--instance_prompt={prompt}",
             f"--resolution={config.resolution}",
             f"--use_8bit_adam",
 #            f"--stop_text_encoder_training=1",
             f"--train_batch_size={config.train_batch_size}",
+            f"--gradient_checkpointing",
             f"--gradient_accumulation_steps={config.gradient_accumulation_steps}",
             f"--learning_rate={config.learning_rate}",
             f"--lr_scheduler={config.lr_scheduler}",
