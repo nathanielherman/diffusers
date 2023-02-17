@@ -296,7 +296,7 @@ _borderrange = None
 _removemask = False
 _relightmodel = False
 _relightprob = 1
-_lightoutput = False
+_lightoutput = True
 rembg_session = None
 _invert = False
 _nomask = False
@@ -343,7 +343,7 @@ def prepare_mask_and_masked_image(image, mask):
         image = torch_to_image(image)
 
     orig = image
-    if random.random() < _relightprob and False:
+    if random.random() < _relightprob:
         image = transforms.ColorJitter(
             brightness=(.5,1.) if random.random() < .5 else (1.,2.),
             #(1.1,1.3),
@@ -1024,7 +1024,7 @@ def main():
                                                # low_cpu_mem_usage=False, ignore_mismatched_sizes=False
                                                )
     print(unet.conv_out.weight.shape)
-    _lightnoise = False
+    _lightnoise = True
     _brightness = False
     _directlight = False
     if _lightnoise:
@@ -1033,7 +1033,7 @@ def main():
         w,b = torch.zeros_like(unet.conv_out.weight) + .001, torch.zeros_like(unet.conv_out.bias) + .001
     else:
         w,b = torch.zeros_like(unet.conv_out.weight) + .000, torch.zeros_like(unet.conv_out.bias)+.000
-    if unet.conv_out.weight.shape[0] < 9 and False:
+    if unet.conv_out.weight.shape[0] < 9:
         unet.conv_out.weight = torch.nn.Parameter(torch.cat([unet.conv_out.weight,
                                                              w,
                                                              torch.zeros((1, 320, 3, 3))+.1,
@@ -1372,7 +1372,6 @@ def main():
                     # Add the prior loss to the instance loss.
                     loss = loss + args.prior_loss_weight * prior_loss
                 else:
-                    #noise_pred, lighting, alpha = torch.split(noise_pred, [4, 4, 1], dim=1)
                     if _weightedloss:
                         sqs = (noise_pred.float() - target.float()) ** 2
                         loss = torch.sum(sqs * weight) / torch.sum(weight) / 4
@@ -1396,7 +1395,7 @@ def main():
                         alpha = (alpha-mi)/(mx-mi)# / 0.5 - 1.0
                         print(mi, mx)
 
-                        vaedecode = False
+                        vaedecode = True
                         unlit_mask = (mask < 0.5) * denoised
                         masked_latents_mask = (mask < 0.5) * masked_latents
                         lit_loss = 0
@@ -1459,27 +1458,18 @@ def main():
 
                         #with torch.no_grad():
                         loss = unlit_loss = 0
-                        bin_mask = torch.cat([mask < .5]*4,dim=1)
                         if _lightnoise:
-                            loss = unlit_loss = .5*F.mse_loss(unlit_mask[bin_mask == 1].float(), masked_latents_mask[bin_mask == 1].float(), reduction="mean")
-                            ul2 = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
-                            print(2*unlit_loss, ul2, F.mse_loss(unlit_mask.float(), (latents*(mask<.5)).float(), reduction="mean"))
-                        litonly_loss = .5*F.mse_loss((denoised_lighting[bin_mask == 1]).float(), (latents[bin_mask == 1]).float(), reduction="mean")
-                        #loss += litonly_loss
-                        bg_loss = .5*F.mse_loss((denoised[bin_mask == 0]).float(), (latents[bin_mask == 0]).float(), reduction="mean")
-                        print(2*bg_loss, F.mse_loss((denoised * (mask>=.5)).float(), (latents * (mask>=.5)).float(), reduction="mean"))
-                        bg_light_loss = .5*F.mse_loss((denoised_lighting[bin_mask == 0]).float(), (latents[bin_mask == 0]).float(), reduction="mean")
-                        loss += bg_loss#(bg_loss + bg_light_loss)
-                        loss *= 2
-                        print(loss)
-                        loss = F.mse_loss(denoised.float(), latents.float(), reduction="mean")
-                        print(loss)
-                        loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-                        print('og_loss', loss)
+                            loss = unlit_loss = F.mse_loss(unlit_mask.float(), masked_latents_mask.float(), reduction="mean")
+                        litonly_loss = F.mse_loss((denoised_lighting * (mask<.5)).float(), (latents*(mask < .5)).float(), reduction="mean")
+                        loss += litonly_loss
+                        bg_loss = F.mse_loss((denoised * (mask>=.5)).float(), (latents * (mask>=.5)).float(), reduction="mean")
+                        bg_light_loss = F.mse_loss((denoised_lighting * (mask>=.5)).float(), (latents * (mask>=.5)).float(), reduction="mean")
+                        loss += (bg_loss + bg_light_loss)
                         #loss += F.mse_loss(orig_alpha.float(), torch.zeros_like(orig_alpha).float(), reduction="mean")
-                        #loss += lit_loss
+                        loss += lit_loss
                         print(lit_loss)
                         print(unlit_loss)
+                        import sys
                         sys.stderr.flush()
                         sys.stdout.flush()
                         with torch.no_grad():
