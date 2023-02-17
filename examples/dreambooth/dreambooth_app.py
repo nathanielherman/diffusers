@@ -195,15 +195,16 @@ def load_images(image_urls):
             MODEL_DIR
         ): volume,  # fine-tuned model will be stored at `MODEL_DIR`
     },
-    timeout=9200,  # 30 minutes
+    timeout=18000,  # 30 minutes
     secrets=[modal.Secret.from_name("my-huggingface-secret")],
     mounts=[
         modal.Mount.from_local_dir(assets_path, remote_path="/data"),
         modal.Mount.from_local_file(script_path, remote_path="/root/train_dreambooth_inpaint.py")
     ],
 )
-def train(instance_example_urls, config=TrainConfig(), model_name="noisegauss2", steps=500, lr=2e-6):
+def train(instance_example_urls, config=TrainConfig(), name="noisegauss2", steps=500, lr=2e-6, model_name='runwayml/stable-diffusion-inpainting', seed=1337):
     config.max_train_steps = steps
+    config.model_name = model_name
     config.learning_rate = lr
     import subprocess
 
@@ -211,8 +212,8 @@ def train(instance_example_urls, config=TrainConfig(), model_name="noisegauss2",
     from accelerate.utils import write_basic_config
     from transformers import CLIPTokenizer
 
-    trained_dir = MODEL_DIR / model_name / "trained"
-    pics_dir = MODEL_DIR / model_name / "pics"
+    trained_dir = MODEL_DIR / name / "trained"
+    pics_dir = MODEL_DIR / name / "pics"
 
     # set up runner-local image and shared model weight directories
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -254,7 +255,7 @@ def train(instance_example_urls, config=TrainConfig(), model_name="noisegauss2",
             f"--lr_scheduler={config.lr_scheduler}",
             f"--lr_warmup_steps={config.lr_warmup_steps}",
             f"--max_train_steps={config.max_train_steps}",
-            f"--seed=1337",
+            f"--seed={seed}",
             f"--rembg",
         ],
         check=True,
@@ -365,5 +366,5 @@ def fastapi_app3(config=AppConfig()):
 
 
 @stub.local_entrypoint
-def run(name, steps=500, lr=2e-6):
-    train.call([], model_name=name, steps=steps, lr=lr)
+def run(name, steps=500, lr=2e-6, model_name='runwayml/stable-diffusion-inpainting', seed=1337):
+    train.call([], name=name, steps=steps, lr=lr, model_name=model_name, seed=seed)
