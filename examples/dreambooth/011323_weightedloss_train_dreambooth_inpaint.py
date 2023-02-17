@@ -348,7 +348,7 @@ def prepare_mask_and_masked_image(image, mask):
             brightness=(.5,1.) if random.random() < .5 else (1.,2.),
             #(1.1,1.3),
             #(.75, 1.1),
-            #contrast=(.6,1.) if random.random() < .5 else (1.,1.67),#(.85, 1.05),
+            contrast=(.6,1.) if random.random() < .5 else (1.,1.67),#(.85, 1.05),
             # saturation=.5,
             # hue=.5,
         )(image)
@@ -1395,7 +1395,7 @@ def main():
                         alpha = (alpha-mi)/(mx-mi)# / 0.5 - 1.0
                         print(mi, mx)
 
-                        vaedecode = True
+                        vaedecode = False
                         unlit_mask = (mask < 0.5) * denoised
                         masked_latents_mask = (mask < 0.5) * masked_latents
                         lit_loss = 0
