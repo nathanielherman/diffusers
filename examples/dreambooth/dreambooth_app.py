@@ -51,20 +51,20 @@ image = (
             channels=["conda-forge", "nvidia"],
         )
     .pip_install(
-        "accelerate==0.14.0",
+        "accelerate",
         "datasets",
         "ftfy",
         "gradio~=3.10",
         "smart_open",
-        "transformers==4.26.0",
-        "torch==1.12.1",
-        "torchvision==0.13.1",
-        "triton==2.0.0.dev20221117",
+        "transformers",
+        "torch",
+        "torchvision",
+        "triton",
         "rembg[gpu]",
         "bitsandbytes==0.35.4",
     )
     #.pip_install("xformers", pre=True)
-    .pip_install(["torch==1.12.1+cu113", "torchvision==0.13.1+cu113"], find_links="https://download.pytorch.org/whl/torch_stable.html")#"https://download.pytorch.org/whl/cu116")
+    #.pip_install(["torch==1.12.1+cu113", "torchvision==0.13.1+cu113"], find_links="https://download.pytorch.org/whl/torch_stable.html")#"https://download.pytorch.org/whl/cu116")
     .apt_install(
         "git",
     )
