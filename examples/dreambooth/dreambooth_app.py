@@ -200,10 +200,11 @@ def load_images(image_urls):
     secrets=[modal.Secret.from_name("my-huggingface-secret")],
     mounts=[
         modal.Mount.from_local_dir(assets_path, remote_path="/data"),
-        modal.Mount.from_local_file(script_path, remote_path="/root/train_dreambooth_inpaint.py")
+        modal.Mount.from_local_file(script_path, remote_path="/root/train_dreambooth_inpaint.py"),
+        modal.Mount.from_local_dir('./1000_4000', remote_path="/basemodel"),
     ],
 )
-def train(instance_example_urls, config=TrainConfig(), name="noisegauss2", steps=500, lr=2e-6, model_name='runwayml/stable-diffusion-inpainting', seed=1337):
+def train(instance_example_urls, config=TrainConfig(), name="noisegauss2", steps=500, lr=2e-6, model_name='/basemodel', seed=1338):
     config.max_train_steps = steps
     config.model_name = model_name
     config.learning_rate = lr

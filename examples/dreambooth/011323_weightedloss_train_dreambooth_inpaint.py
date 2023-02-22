@@ -345,10 +345,10 @@ def prepare_mask_and_masked_image(image, mask):
     orig = image
     if random.random() < _relightprob:
         image = transforms.ColorJitter(
-            brightness=(.5,1.) if random.random() < .5 else (1.,2.),
+            brightness=.5,#(.5,1.) if random.random() < .5 else (1.,2.),
             #(1.1,1.3),
             #(.75, 1.1),
-            contrast=(.6,1.) if random.random() < .5 else (1.,1.67),#(.85, 1.05),
+            contrast=.4,#(.6,1.) if random.random() < .5 else (1.,1.67),#(.85, 1.05),
             # saturation=.5,
             # hue=.5,
         )(image)
@@ -1021,6 +1021,7 @@ def main():
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     print(7)
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet",
+                                                out_channels=8,
                                                # low_cpu_mem_usage=False, ignore_mismatched_sizes=False
                                                )
     print(unet.conv_out.weight.shape)
@@ -1036,13 +1037,13 @@ def main():
     if unet.conv_out.weight.shape[0] < 9:
         unet.conv_out.weight = torch.nn.Parameter(torch.cat([unet.conv_out.weight,
                                                              w,
-                                                             torch.zeros((1, 320, 3, 3))+.1,
+                                                             #torch.zeros((1, 320, 3, 3))+.1,
                                                              ]))
         print(unet.conv_out.weight.shape)
         print(unet.conv_out.bias.shape)
         unet.conv_out.bias = torch.nn.Parameter(torch.cat([unet.conv_out.bias,
                                                            b,
-                                                           torch.zeros((1,)) + .1,
+                                                           #torch.zeros((1,)) + .1,
                                                            ]))
 
     print(6)
@@ -1377,8 +1378,8 @@ def main():
                         loss = torch.sum(sqs * weight) / torch.sum(weight) / 4
                     elif _lightoutput:
                         print(noise_pred.shape)
-                        noise_pred, lighting, alpha = torch.split(noise_pred, [4, 4, 1], dim=1)
-                        print(noise_pred.shape, lighting.shape, alpha.shape)
+                        noise_pred, lighting  = torch.split(noise_pred, [4, 4], dim=1)
+                        print(noise_pred.shape, lighting.shape)
                         # relit = noise_pred * .5 + (lighting * mask) * .5
                         # loss = F.mse_loss(relit.float(), target.float(), reduction="mean")
 
@@ -1388,12 +1389,12 @@ def main():
                         else:
                             denoised_lighting = lighting
 
-                        orig_alpha = alpha
-                        mi = torch.min(alpha)
-                        mx = torch.max(alpha)
+                        #orig_alpha = alpha
+                        #mi = torch.min(alpha)
+                        #mx = torch.max(alpha)
                         #alpha = torch.clamp(1+alpha, .5, 2)
-                        alpha = (alpha-mi)/(mx-mi)# / 0.5 - 1.0
-                        print(mi, mx)
+                        #alpha = (alpha-mi)/(mx-mi)# / 0.5 - 1.0
+                        #print(mi, mx)
 
                         vaedecode = False
                         unlit_mask = (mask < 0.5) * denoised
@@ -1405,7 +1406,7 @@ def main():
                             # orig = denoised_img
                             denoised_img = vae.decode(1 / 0.18215 * denoised).sample
                             if not _brightness:
-                                alpha_up = F.interpolate(alpha, scale_factor=8, mode='bicubic')
+                                #alpha_up = F.interpolate(alpha, scale_factor=8, mode='bicubic')
                                 if _directlight:
                                     denoised_lighting_img = F.interpolate(torch.split(denoised_lighting,[3,1],dim=1)[0], scale_factor=8, mode='bicubic')#vae.decode(1 / 0.18215 * denoised_lighting).sample
                                 else:
